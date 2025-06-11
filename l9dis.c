@@ -1,5 +1,5 @@
 #define PRGNAME "L9Dis"
-#define PRGVERSION "0.4 BETA"
+#define PRGVERSION "0.4321 BETA"
 
 /*
    #define MESSNUMDEBUG
@@ -11,9 +11,13 @@
 /*
    l9dis.c
 
-   - disassembles Level 9 datafile (V3-4)
+   - disassembles Level 9 datafile
 
    Author: Paul David Doherty <h0142kdd@rz.hu-berlin.de>
+   Archive: https://ifarchive.org/indexes/if-archive/level9/tools/
+   Extensions: https://github.com/balyuf/l9dis.git
+   Integrated parts of: https://github.com/DavidKinder/Level9.git
+   Inspiration: https://github.com/ajgbarnes/level9.git
 
    v0.0:    29 Nov 1997
  */
@@ -43,18 +47,39 @@ type8 l9check;
 
 type16 pc;
 type8 code;
-type8 jumped;
+type8 jumped = FALSE;
+type16 maxaddr = 0;
 type8 highvar = 0;
 type16 highword = 0xffff;
-type8 jumptablesize = 0, newjumptablesize = 0;
-type16 jumptable = 0;
+type8 jumptablesize[10] = {0,}, newjumptablesize = 0, jumptablenmbr;
+type16 jumptable[10] = {0,};
 type8 pass = 0, runjump = 0;
 
 /* header values */
-type16 startmd, endmd, defdict, enddict, dictdata, dictdatalen;
+type16 startmd, startmdV2, endmd, endmdV2, defdict, enddict, dictdata, dictdatalen;
 type16 wordtable, unknown10, absdatablock;
 type16 list0, list1, list2, list3, list4, list5;
 type16 list6, list7, list8, list9, acodeptr, acodeend;
+
+/* V2 support */
+type8 isV2 = FALSE;
+
+/* V1 support */
+struct L9V1GameInfo
+{
+        type8 dictVal1, dictVal2;
+        int dictStart, L9Ptrs[5], absData, msgStart, msgLen, acode;
+};
+struct L9V1GameInfo L9V1Games[] =
+{
+        { 0x1a,0x24,301, { 0x0000,-0x004b, 0x0080,-0x002b, 0x00d0 },0x03b0, 0x0f80,0x4857,0x0760 }, /* Colossal Adventure */
+        { 0x20,0x3b,283, {-0x0583, 0x0000,-0x0508,-0x04e0, 0x0000 },0x0800, 0x1000,0x39d1,0x04c8 }, /* Adventure Quest */
+        { 0x14,0xff,153, {-0x00d6, 0x0000, 0x0000, 0x0000, 0x0000 },0x0a20, 0x16bf,0x420d,0x0740 }, /* Dungeon Adventure */
+        { 0x15,0x5d,252, {-0x3e70, 0x0000,-0x3d30,-0x3ca0, 0x0100 },0x4120,-0x3b9d,0x3988,0x4a00 }, /* Lords of Time */
+        { 0x15,0x6c,284, {-0x00f0, 0x0000,-0x0050,-0x0050,-0x0050 },0x0300, 0x1930,0x3c17,0x0a10 }, /* Snowball */
+};
+int L9V1Game = -1;
+type16 L9Pointers[12];
 
 /* arbitrary V3/V4 distinction based on Archers/Adrian Mole */
 #define V3LIMIT 0x8500
@@ -74,7 +99,7 @@ usage (void)
   fprintf (stderr,
 	   PRGNAME " version " PRGVERSION ":\n");
   fprintf (stderr,
-	   "Disassembles Level 9 datafile (V3-4).\n");
+	   "Disassembles Level 9 datafile.\n");
   fprintf (stderr, "Source code available on request.\n");
   fprintf (stderr,
 	   "(c) 1997 by Paul David Doherty <h0142kdd@rz.hu-berlin.de>\n\n");
@@ -104,16 +129,90 @@ calcwordBE (type16 i)
   return (calc);
 }
 
+void ScanV1(void)
+{
+  type32 i;
+  int dictOff1, dictOff2;
+  type8 dictVal1 = 0xff, dictVal2 = 0xff;
+
+  /* V1 dictionary detection from L9Cut by Paul David Doherty */
+  for (i=0;i<infilelength-20;i++)
+  {
+    if (infiledata[i]=='A')
+    {
+      if (infiledata[i+1]=='T' && infiledata[i+2]=='T' && infiledata[i+3]=='A' && infiledata[i+4]=='C' && infiledata[i+5]==0xcb)
+      {
+        dictOff1 = i;
+        dictVal1 = infiledata[dictOff1+6];
+        break;
+      }
+    }
+  }
+  for (i=dictOff1;i<infilelength-20;i++)
+  {
+    if (infiledata[i]=='B')
+    {
+      if (infiledata[i+1]=='U' && infiledata[i+2]=='N' && infiledata[i+3]=='C' && infiledata[i+4] == 0xc8)
+      {
+        dictOff2 = i;
+        dictVal2 = infiledata[dictOff2+5];
+        break;
+      }
+    }
+  }
+  L9V1Game = -1;
+  if (dictVal1 != 0xff || dictVal2 != 0xff)
+  {
+    for (i = 0; i < sizeof L9V1Games / sizeof L9V1Games[0]; i++)
+    {
+      if ((L9V1Games[i].dictVal1 == dictVal1) && (L9V1Games[i].dictVal2 == dictVal2))
+      {
+        L9V1Game = i;
+        dictdata = dictOff1-L9V1Games[i].dictStart;
+      }
+    }
+  }
+  if (L9V1Game != -1) {
+    l9length = infilelength - 2;
+    acodeptr = dictdata + L9V1Games[L9V1Game].acode;
+    for (i = 0; i < 5; i++) {
+      int off = L9V1Games[L9V1Game].L9Ptrs[i];
+      if (off < 0)
+        L9Pointers[i + 2] = acodeptr + off;
+      else
+        L9Pointers[i + 2] = 0x8000 + off;
+    }
+  }
+}
+
 void
 docheck (void)
 {
   type16 j;
-  type8 checksum = 0;
+  type8 checksum;
 
-  for (j = 0; j <= l9length; j++)
-    checksum += infiledata[j];
-  if (checksum != 0)
-    ex ("corrupt datafile (or not V3-4)");
+  l9length = calcwordLE (0x1c); /* v2 */
+  if (l9length > 0 && l9length < infilelength) {
+    checksum = 0;
+    for (j = 0x20; j <= l9length; j++)
+      checksum += infiledata[j];
+    if (checksum == infiledata[0x1e])
+      { isV2 = TRUE; return; }
+  }
+
+  l9length = calcwordLE (0); /* v3-4 */
+  if (l9length > 0 && l9length < infilelength) {
+    checksum = 0;
+    for (j = 0; j <= l9length; j++)
+      checksum += infiledata[j];
+    if (checksum == 0) return;
+  }
+
+  ScanV1(); /* v1 */
+  if (L9V1Game != -1)
+    { isV2 = TRUE; return; }
+
+  ex ("corrupt datafile");
 }
 
 
@@ -129,6 +228,7 @@ docheck (void)
 #define SZLIG 225
 
 type8 new_mess = TRUE;
+type8 end_mess = FALSE;
 type8 count_in_line;
 
 void
@@ -265,17 +365,21 @@ prtaddr (void)
 
   if (pass == 3)
     {
-      if ((realaddr > jumptable) && (realaddr < (jumptable + 2 * jumptablesize)))
-	jumptablesize = (type8) ((realaddr - jumptable) / 2);
+      if ((realaddr > jumptable[jumptablenmbr]) && (realaddr < (jumptable[jumptablenmbr] + 2 * jumptablesize[jumptablenmbr])))
+	jumptablesize[jumptablenmbr] = (type8) ((realaddr - jumptable[jumptablenmbr]) / 2);
     }
 
   if (((type32) realaddr + (type32) acodeptr) > (type32) acodeend)
     {
       if ((pass == 2) && (runjump == 1) && (newjumptablesize == 0))
-	newjumptablesize = (type8) ((pc - 2 - acodeptr - jumptable) / 2);
+	newjumptablesize = (type8) ((pc - 2 - acodeptr - jumptable[jumptablenmbr]) / 2);
       if (pass == 4)
 	fprintf (stdout, "*** JUMP TOO HIGH ***");
     }
+
+  if (((type32) realaddr + (type32) acodeptr) <= (type32) acodeend &&
+      ((type32) realaddr + (type32) acodeptr) > (type32) maxaddr)
+     maxaddr = realaddr + acodeptr;
 }
 
 
@@ -587,11 +691,16 @@ do_instr (void)
 	      fprintf (stdout, "%05u ", temp16);
 	      fprintf (stdout, "[#%04x] ", temp16);
 	    }
-	  if ((jumptable == 0) && (pass == 1))
-	    {
-	      jumptable = temp16;	/* assuming 1 jumptable!!! */
-	      jumptablesize = 255;
-	    }
+	  if ((jumptable[jumptablenmbr] < temp16))
+            {
+              if (jumptable[jumptablenmbr] != 0 && jumptablenmbr < 9)
+                jumptablenmbr++;
+              if (pass == 1)
+                {
+                  jumptable[jumptablenmbr] = temp16;
+                  jumptablesize[jumptablenmbr] = 255;
+                }
+            }
 	  if (pass == 4)
 	    fprintf (stdout, " <- ");
 	  prtvar ();
@@ -817,16 +926,17 @@ do_disassembly (void)
       prtline ();
     }
 
+  jumptablenmbr = 0;
   pc = acodeptr;
-  while (pc < acodeend)
+  while (pc < acodeend && !(jumped && pc > maxaddr))
     {
-      if ((jumptable != 0) && ((acodeptr + jumptable) == pc))
+      if ((jumptable[jumptablenmbr] != 0) && ((acodeptr + jumptable[jumptablenmbr]) == pc))
 	{
 	  runjump = 1;
 
 	  if (pass == 4)
 	    fprintf (stdout, "JUMPTABLE:\n");
-	  for (i = 0; i < jumptablesize; i++)
+	  for (i = 0; i < jumptablesize[jumptablenmbr]; i++)
 	    {
 	      if (pass == 4)
 		{
@@ -843,7 +953,7 @@ do_disassembly (void)
 	    prtline ();
 	  runjump = 0;
 	  if (pass == 2)
-	    jumptablesize = newjumptablesize;
+	    jumptablesize[jumptablenmbr] = newjumptablesize;
 	}
       code = infiledata[pc];
       jumped = FALSE;
@@ -989,6 +1099,12 @@ do_dictbank (type16 offset, type16 wordstart, type16 wordnum)
  */
 
 void
+show_message_word (type16 wordref, type16 keywords);
+
+void
+do_messages (type16 keywords);
+
+void
 do_dictionary (type16 wordnum)
 {
   type16 i, pcdict, wordstart;
@@ -1001,6 +1117,7 @@ do_dictionary (type16 wordnum)
       prtline ();
       fprintf (stdout, "Dictionary:\n");
       prtline ();
+      fprintf (stdout, "Banks:\n");
     }
 
   pctemp = dictdata;
@@ -1045,7 +1162,21 @@ do_dictionary (type16 wordnum)
       prevpcdict = pcdict;
     }
   if (wordnum == 0xffff)
-    fprintf (stdout, "\nHighest word: #%04x\n\n", highword);
+    {
+      fprintf (stdout, "\nHighest word: #%04x\n\n", highword);
+      fprintf (stdout, "Word table:\n");
+      for (i = 0; i < 128; i++)
+        {
+	  type16 wordref = calcwordBE (wordtable + i * 2);
+          fprintf (stdout, "%02x: ", i);
+          new_mess = TRUE;
+          show_message_word (wordref, FALSE);
+          fprintf (stdout, "\n");
+        }
+      fprintf (stdout, "\nCommands:\n");
+      do_messages(TRUE);
+      fprintf (stdout, "\n");
+    }
   else
     {
       prt_char (SEP /* '*'  */ );
@@ -1053,12 +1184,70 @@ do_dictionary (type16 wordnum)
     }
 }
 
+int IsDictionaryChar(char c)
+{
+  switch (c)
+    {
+      case '?': case '-': case '\'': case '/': return TRUE;
+      case '!': case '.': case ',': return TRUE;
+    }
+    return isupper(c) || isdigit(c);
+}
+
+void
+do_dictionary_v2 (type16 wordnum)
+{
+  type8 *ptr=infiledata+dictdata, x;
+  type16 currword = 0;
+
+  if (wordnum == 0xffff)
+    {
+      fprintf (stdout, "\n");
+      prtline ();
+      fprintf (stdout, "Dictionary:\n");
+      prtline ();
+    }
+
+  do
+    {
+      currword++;
+      if (wordnum == 0xffff)
+        {
+          fprintf (stdout, "\n%03x: ", currword);
+	  new_mess = TRUE;
+        }
+      do
+        {
+          x = *ptr++;
+          if (!IsDictionaryChar(x & 0x7f)) break;
+          if (wordnum == 0xffff || currword == wordnum)
+            if (x > 0) prt_char(x & 0x7f);
+        }
+      while (x > 0 && x < 0x7f);
+      if (x == 0 || !IsDictionaryChar(x & 0x7f))
+        {
+          fprintf (stdout, "<BOGUS>");
+          currword--;
+          break;
+	}
+      ptr++;
+      /* if (infiledata+enddictdata - ptr <= 1) break; */
+      if (!IsDictionaryChar(*ptr & 0x7f)                           || \
+          (*ptr <= 0x7f && !IsDictionaryChar(*(ptr+1) & 0x7f))     || \
+          (*(ptr+1) <= 0x7f && !IsDictionaryChar(*(ptr+2) & 0x7f))    \
+	 ) break;
+    }
+  while (currword < wordnum);
+  if (wordnum == 0xffff)
+    fprintf (stdout, "\n\nHighest word: #%04x\n\n", currword);
+}
+
 /*
    messages handling
  */
 
 void
-show_message_word (type16 wordref)
+show_message_word (type16 wordref, type16 keywords)
 {
   type16 d5, Off;
 
@@ -1068,17 +1257,29 @@ show_message_word (type16 wordref)
   if (Off < 0x0f80)
     {
       if (Off <= highword)
-	do_dictionary (Off);
+        {
+          if (!keywords || d5 == 1)
+            {
+              if (keywords)
+                {
+                  new_mess = TRUE;
+	          fprintf (stdout, "%04x: ", keywords);
+                }
+	      do_dictionary (Off);
+              if (keywords)
+	        fprintf (stdout, "\n");
+            }
+        }
       else
 	fprintf (stdout, "***highword!!![%04x]***", Off);
     }
-  else if (Off == 0x0f80)
+  else if (Off == 0x0f80 && !keywords)
     {
       fprintf (stdout, "\n       [aka]");
       last_char = ',';		/* hack for no caps */
       count_in_line = 13;
     }
-  else
+  else if (!keywords)
     {
       if (d5 & 2)
 	prt_char (' ');
@@ -1091,9 +1292,9 @@ show_message_word (type16 wordref)
 
 
 void
-display_mess (type16 length)
+display_mess (type16 length, type16 keywords)
 {
-  type16 i = 1;
+  type16 i = 0;
   type8 byte;
   type16 wordref;
 
@@ -1120,30 +1321,30 @@ display_mess (type16 length)
 #endif
 	  i++;
 	}
-      show_message_word (wordref);
+      show_message_word (wordref, keywords);
     }
-  fprintf (stdout, "\n");
+  if (!keywords)
+    fprintf (stdout, "\n");
 }
 
 
 void
-do_messages (void)
+do_messages (type16 keywords)
 {
   type16 messnum = 0;
-  type16 startpc;
-  type16 length;
-  type8 i, j;
+  type16 len, length;
 
-  prtline ();
-  fprintf (stdout, "Message database:\n");
-  prtline ();
-  fprintf (stdout, "\n");
+  if (!keywords)
+    {
+      prtline ();
+      fprintf (stdout, "Message database:\n");
+      prtline ();
+      fprintf (stdout, "\n");
+    }
 
   pc = startmd;
   while (pc < endmd)
     {
-      startpc = pc;
-
 #ifdef MESSNUMDEBUG
       fprintf (stdout, " [#%02x;L#%02x] ", messnum, infiledata[pc]);
 #endif
@@ -1153,49 +1354,132 @@ do_messages (void)
 #ifdef MESSNUMDEBUG
 	  fprintf (stdout, "#80L:%02x ", (infiledata[pc] - 0x80));
 #endif
-	  messnum = messnum + 1 + (infiledata[pc] - 0x80);
-	  pc++;
+	  messnum = messnum + 1 + (infiledata[pc++] - 0x80);
 	}
       else
 	{
-	  fprintf (stdout, "M%04d: ", messnum);
+          if (keywords)
+            keywords = messnum;
+          else
+	    fprintf (stdout, "M%04d: ", messnum);
 	  new_mess = TRUE;
-
-	  length = infiledata[startpc];
-	  if (infiledata[startpc] > /*=*/ 0x40)
-	    length = infiledata[startpc] - 0x40;
-	  else if (infiledata[startpc] == 0x40)
-	    {
-	      j = 1;
-	      while (infiledata[startpc + j] == 0x40)
-		j++;
-
-	      length = infiledata[startpc + j] + ((j - 1) * 0x3f) - 1;
-	      pc = pc + j;
-
-#ifdef MESSNUMDEBUG
-	      fprintf (stdout, "#40L:%04x ", length);
-#endif
-	    }
-	  else if (infiledata[startpc] == 0x00)
-	    {
-	      j = 1;
-	      while (infiledata[startpc + j] == 0)
-		j++;
-
-	      length = infiledata[startpc + j] + (j * 0x3f);
-	      pc = pc + j;
-
-#ifdef MESSNUMDEBUG
-	      fprintf (stdout, "#00L:%04x ", length);
-#endif
-
-	    }
-	  pc++;
-	  display_mess (length);
+          length = 0;
+	  do
+	    length += len = ((signed)infiledata[pc++] - 1) & 0x3f;
+	  while (len == 0x3f);
+	  display_mess (length, keywords);
 	  messnum++;
 	}
     }
+}
+
+void printcharV2(char c)
+{
+        if (c==0x25) c=0xd;
+        else if (c==0x5f) c=0x20;
+        prt_char(c);
+}
+
+int msglenV2(type8 **ptr)
+{
+        int i=0;
+        type8 a;
+
+        /* catch berzerking code */
+        if (*ptr >= infiledata+l9length) return 0;
+
+        while ((a=**ptr)==0)
+        {
+         (*ptr)++;
+
+         if (*ptr >= infiledata+l9length) return 0;
+
+         i+=255;
+        }
+        i+=a;
+        return i;
+}
+
+void displaywordV2(type8 *ptr,int msg)
+{
+        int n,messnum=msg;
+	int mdV2=(ptr-infiledata==startmdV2-1);
+        type8 a;
+        if (msg==0) return;
+        while (--msg)
+        {
+                ptr+=msglenV2(&ptr);
+		if (!mdV2 && ptr-infiledata>=startmdV2-1) { end_mess = TRUE; return; }
+        }
+        n=msglenV2(&ptr);
+
+	if (ptr<infiledata+startmdV2-1 && n>1 && *(ptr+1)>=3)
+		fprintf (stdout, "\nM%04d: ", messnum);
+
+        while (--n>0)
+        {
+                a=*++ptr;
+                if (a<3) return;
+
+                if (a>=0x5e) displaywordV2(infiledata+startmdV2-1,a-0x5d);
+                else printcharV2((char)(a+0x1d));
+        }
+}
+
+int msglenV1(type8 **ptr)
+{
+        type8 *ptr2=*ptr;
+        while (ptr2<infiledata+l9length && *ptr2++>=3);
+        return ptr2-*ptr;
+}
+
+void displaywordV1(type8 *ptr,int msg)
+{
+        int n,messnum=msg;
+	int mdV2=(ptr-infiledata==startmdV2);
+        type8 a;
+        while (msg--)
+        {
+                ptr+=msglenV1(&ptr);
+		if (!mdV2 && (ptr-infiledata>=startmdV2 || *(ptr-1) == 2)) { end_mess = TRUE; return; }
+        }
+        n=msglenV1(&ptr);
+
+	if (ptr<infiledata+startmdV2 && n>1)
+		fprintf (stdout, "\nM%04d: ", messnum);
+
+        while (--n>0)
+        {
+                a=*ptr++;
+                if (a<3) return;
+
+                if (a>=0x5e) displaywordV1(infiledata+startmdV2,a-0x5e);
+                else printcharV2((char)(a+0x1d));
+        }
+}
+
+void printmessageV2(int Msg)
+{
+        if (infiledata[startmd]!=1) displaywordV2(infiledata+startmd,Msg);
+        else displaywordV1(infiledata+startmd,Msg);
+}
+
+void
+do_messages_v2 (void)
+{
+  type16 messnum = 0;
+
+  prtline ();
+  fprintf (stdout, "Message database:\n");
+  prtline ();
+
+  while (messnum++ < 9999 && !end_mess)
+    {
+       new_mess = TRUE;
+       printmessageV2(messnum);
+    }
+
+  fprintf (stdout, "\n");
 }
 
 /*>>>>>>>>>>>>>>>>>>>>> main <<<<<<<<<<<<<<<<<<<<< */
@@ -1242,71 +1526,115 @@ main (int argc, char **argv)
   infilelength = infilelength + 2;
 
 /* calculate checksum */
-  l9length = calcwordLE (0);
   docheck ();
 
   fprintf (stdout, "Opening file \"%s\"...\n", argv[1]);
-  fprintf (stdout, "V%d datafile found...\n", (l9length > V3LIMIT) ? 4 : 3);
+  if (L9V1Game != -1) fprintf (stdout, "V1 datafile found...\n");
+  else if (isV2) fprintf (stdout, "V2 datafile found...\n");
+  else fprintf (stdout, "V%d datafile found...\n", (l9length > V3LIMIT) ? 4 : 3);
   fprintf (stdout, "\nDatafile length: %04x\n", l9length);
 
 /* read header */
-  startmd = calcwordLE (2);
-  endmd = startmd + calcwordLE (4);
-  defdict = calcwordLE (6);
-  enddict = defdict /* + 5 */  + calcwordLE (8);
-  dictdata = calcwordLE (0x0a);
-  dictdatalen = calcwordLE (0x0c);
-  wordtable = calcwordLE (0x0e);
-
-  unknown10 = calcwordLE (0x10);
-
-  absdatablock = calcwordLE (0x12);
-  list0 = calcwordLE (0x14);
-  list1 = calcwordLE (0x16);
-  list2 = calcwordLE (0x18);
-  list3 = calcwordLE (0x1a);
-  list4 = calcwordLE (0x1c);
-  list5 = calcwordLE (0x1e);
-  list6 = calcwordLE (0x20);
-  list7 = calcwordLE (0x22);
-  list8 = calcwordLE (0x24);
-  list9 = calcwordLE (0x26);
-  acodeptr = calcwordLE (0x28);
+  if (L9V1Game != -1) {
+    /* acodeptr is calculated in ScanV1 */
+    startmd = acodeptr + L9V1Games[L9V1Game].msgStart;
+    startmdV2 = startmd + L9V1Games[L9V1Game].msgLen;
+    endmd = startmdV2;
+    endmdV2 = (startmdV2 < acodeptr) ? acodeptr : l9length;
+    while (infiledata[endmdV2] == 0 || infiledata[endmdV2] == 0xff)
+      endmdV2--;
+    endmdV2++;
+    absdatablock = acodeptr - L9V1Games[L9V1Game].absData;
+    /* dictdata is calculated in ScanV1 */
+    list1 = L9Pointers[2];
+    list2 = L9Pointers[3];
+    list3 = L9Pointers[4];
+    list4 = L9Pointers[5];
+    list5 = L9Pointers[6];
+  } else if (isV2) {
+    startmd = calcwordLE (0);
+    startmdV2 = calcwordLE (2);
+    endmd = startmdV2;
+    absdatablock = calcwordLE (0x04);
+    dictdata = calcwordLE (0x06);
+    list1 = calcwordLE (0x08);
+    list2 = calcwordLE (0x0a);
+    list3 = calcwordLE (0x0c);
+    list4 = calcwordLE (0x0e);
+    list5 = calcwordLE (0x10);
+    list6 = calcwordLE (0x12);
+    list7 = calcwordLE (0x14);
+    list8 = calcwordLE (0x16);
+    list9 = calcwordLE (0x18);
+    acodeptr = calcwordLE (0x1a);
+    endmdV2 = acodeptr;
+  } else {
+    startmd = calcwordLE (2);
+    endmd = startmd + calcwordLE (4);
+    defdict = calcwordLE (6);
+    enddict = defdict /* + 5 */  + calcwordLE (8);
+    dictdata = calcwordLE (0x0a);
+    dictdatalen = calcwordLE (0x0c);
+    wordtable = calcwordLE (0x0e);
+    unknown10 = calcwordLE (0x10);
+    absdatablock = calcwordLE (0x12);
+    list0 = calcwordLE (0x14);
+    list1 = calcwordLE (0x16);
+    list2 = calcwordLE (0x18);
+    list3 = calcwordLE (0x1a);
+    list4 = calcwordLE (0x1c);
+    list5 = calcwordLE (0x1e);
+    list6 = calcwordLE (0x20);
+    list7 = calcwordLE (0x22);
+    list8 = calcwordLE (0x24);
+    list9 = calcwordLE (0x26);
+    acodeptr = calcwordLE (0x28);
+  }
 
   acodeend = (startmd > acodeptr) ? (startmd - 1) : (l9length - 1);
-  while (infiledata[acodeend] == 0)
+  while (infiledata[acodeend] == 0 || infiledata[acodeend] == 0xff)
     acodeend--;
   acodeend++;
 
 /* print header */
   fprintf (stdout, "startmd:     %04x\n", startmd);
   fprintf (stdout, "endmd:       %04x\n", endmd);
-  fprintf (stdout, "defdict:     %04x\n", defdict);
-  fprintf (stdout, "enddict:     %04x\n", enddict);
+  if (isV2) {
+    fprintf (stdout, "startmdV2:   %04x\n", startmdV2);
+    fprintf (stdout, "endmdV2:     %04x\n", endmdV2);
+    fprintf (stdout, "absdatablock:%04x\n", absdatablock);
+  }
+  if (!isV2) {
+    fprintf (stdout, "defdict:     %04x\n", defdict);
+    fprintf (stdout, "enddict:     %04x\n", enddict);
+  }
   fprintf (stdout, "dictdata:    %04x\n", dictdata);
-  fprintf (stdout, "dictdatalen: %04x\n", dictdatalen);
-  fprintf (stdout, "wordtable:   %04x\n", wordtable);
-  fprintf (stdout, "unknown10:   %04x\n", unknown10);
-
-  fprintf (stdout, "absdatablock:%04x\n", absdatablock);
-  fprintf (stdout, "list0:       %04x\n", list0);
+  if (!isV2) {
+    fprintf (stdout, "dictdatalen: %04x\n", dictdatalen);
+    fprintf (stdout, "wordtable:   %04x\n", wordtable);
+    fprintf (stdout, "unknown10:   %04x\n", unknown10);
+    fprintf (stdout, "absdatablock:%04x\n", absdatablock);
+    fprintf (stdout, "list0:       %04x\n", list0);
+  }
   fprintf (stdout, "list1:       %04x\n", list1);
   fprintf (stdout, "list2:       %04x\n", list2);
   fprintf (stdout, "list3:       %04x\n", list3);
   fprintf (stdout, "list4:       %04x\n", list4);
   fprintf (stdout, "list5:       %04x\n", list5);
-  fprintf (stdout, "list6:       %04x\n", list6);
-  fprintf (stdout, "list7:       %04x\n", list7);
-  fprintf (stdout, "list8:       %04x\n", list8);
-  fprintf (stdout, "list9:       %04x\n", list9);
+  if (L9V1Game == -1) {
+    fprintf (stdout, "list6:       %04x\n", list6);
+    fprintf (stdout, "list7:       %04x\n", list7);
+    fprintf (stdout, "list8:       %04x\n", list8);
+    fprintf (stdout, "list9:       %04x\n", list9);
+  }
   fprintf (stdout, "acodeptr:    %04x\n", acodeptr);
   fprintf (stdout, "acodeend:    %04x\n", acodeend);
 
 /*   do dictionary, get highword */
-  do_dictionary (0xffff);
+  if (isV2) do_dictionary_v2 (0xffff); else do_dictionary (0xffff); 
 
 /* do messages, get highmess */
-  do_messages ();
+  if (isV2) do_messages_v2 (); else do_messages (FALSE);
 
 /* do acode, get highcodemess */
 /* try to print messages ! */
