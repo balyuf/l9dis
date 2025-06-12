@@ -1,0 +1,1 @@
+The l9dis tools disassembles Level 9 game data files.  This version adds support for v1 and v2 games, adds support for multiple jump tables, fixes the message database decoding of v3 and v4 games, and now also prints the word table and commands for those.
